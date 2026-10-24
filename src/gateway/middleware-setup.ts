@@ -27,6 +27,25 @@ import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 
+/**
+ * 白名单条目归一化。
+ *
+ * - 支持 `备注|openid` 写法：备注可以写 QQ 号/群号或人名（自己看得懂就行），
+ *   匹配时只取最后一个 `|` 之后的值。官方 Bot API 不提供真实 QQ 号/群号
+ *   （事件里只有 user_openid / group_openid），所以号码只能作为标签存在。
+ * - **空数组必须原样返回**。原实现退化成 `['*']`，而 SDK 的 matcherMatches
+ *   把 `'*'` 当全匹配通配符 —— 等于「allowlist 模式 + 空白名单 = 全放行」，
+ *   是 fail-open。空数组交给 SDK 后会被判成 "allowlist is empty" 并全部拒绝。
+ */
+function normalizeAllow(list: readonly string[] | undefined): string[] {
+  return (list ?? [])
+    .map((entry) => {
+      const sep = entry.lastIndexOf('|');
+      return (sep >= 0 ? entry.slice(sep + 1) : entry).trim();
+    })
+    .filter((entry) => entry !== '');
+}
+
 export function setupMiddlewares(
   bot: QQBot,
   config: ImQQBotConfig,
@@ -43,16 +62,16 @@ export function setupMiddlewares(
   bot.use(accessPolicy({
     c2c: {
       mode: config.access.c2cMode,
-      allow: config.access.c2cAllow.length > 0 ? config.access.c2cAllow : ['*'],
+      allow: normalizeAllow(config.access.c2cAllow),
     },
     group: {
       mode: config.access.groupMode,
-      allow: config.access.groupAllow.length > 0 ? config.access.groupAllow : ['*'],
+      allow: normalizeAllow(config.access.groupAllow),
     },
     onBlock: (_mCtx, reason) => {
-      if (config.debug) {
-        logger.debug(`Access blocked: ${reason}`);
-      }
+      // 被拒时始终记一条 info：reason 里带 openid，用户第一次配置白名单时
+      // 就靠这行拿到自己的标识（桌面版的 debug 日志默认看不到）。
+      logger.info(`Access blocked: ${reason}`);
     },
   }));
 

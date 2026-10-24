@@ -382,7 +382,7 @@ export function ConfigPanel(): ReactNode {
     }),
     access.c2cMode === 'allowlist'
       ? createElement(AreaRow, {
-          label: '私聊白名单', help: '请输入用户 openid，多个请换行输入', rows: 3,
+          label: '私聊白名单', help: '每行一个：openid，或「备注|openid」（备注可写 QQ 号，仅作标签）。官方 Bot API 不返回真实 QQ 号，匹配只能用 openid', rows: 3,
           value: access.c2cAllow.join('\n'),
           onChange: (v) => { patch('access', { ...access, c2cAllow: v.split('\n').map((s) => s.trim()) }); },
         })
@@ -393,7 +393,7 @@ export function ConfigPanel(): ReactNode {
     }),
     access.groupMode === 'allowlist'
       ? createElement(AreaRow, {
-          label: '群聊白名单', help: '请输入群 openid，多个请换行输入', rows: 3,
+          label: '群聊白名单', help: '每行一个：group_openid，或「备注|group_openid」（备注可写群号，仅作标签）', rows: 3,
           value: access.groupAllow.join('\n'),
           onChange: (v) => { patch('access', { ...access, groupAllow: v.split('\n').map((s) => s.trim()) }); },
         })
