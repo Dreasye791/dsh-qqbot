@@ -39,6 +39,39 @@ export function pingCommand(): CategorizedCommand {
   };
 }
 
+/**
+ * /bot-id — 查看当前会话的 openid（配置白名单用）
+ *
+ * 官方 Bot API 不返回真实 QQ 号/群号，事件里只有 user_openid / group_openid，
+ * 而这两者没有任何后台可查 —— 只能在会话内取。群聊场景下这条命令是最省事的方式：
+ * 把模式设成 allowlist 之前先发一次 /bot-id，拿到值填进白名单。
+ */
+export function idCommand(): CategorizedCommand {
+  return {
+    name: 'bot-id',
+    category: 'qqbot',
+    description: '查看当前会话的 openid（配置白名单用）',
+    usage: [
+      '/bot-id',
+      '',
+      '显示当前会话的 scope、聊天标识（群 openid / 用户 openid）与你的 openid。',
+      '官方 Bot API 不提供真实 QQ 号/群号，白名单只能用这里给出的 openid。',
+      '备注可以写在白名单条目的竖线前，例如「我的QQ 123456|<openid>」。',
+    ].join('\n'),
+    handler: (ctx) => {
+      const { scope, peerId } = getScopePeer(ctx);
+      const senderId = (ctx.message as { senderId?: string }).senderId ?? '';
+      return [
+        `scope: ${scope}`,
+        `${scope === 'group' ? '群' : '用户'} openid: ${peerId}`,
+        `你的 openid: ${senderId}`,
+        '',
+        '把上面这行填进白名单即可（可写成「备注|openid」）。',
+      ].join('\n');
+    },
+  };
+}
+
 /** /bot-version — 查看版本信息 */
 export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   return {

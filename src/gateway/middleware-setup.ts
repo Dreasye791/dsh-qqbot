@@ -4,6 +4,9 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
+import { appendFileSync } from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import type { QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
@@ -46,6 +49,44 @@ function normalizeAllow(list: readonly string[] | undefined): string[] {
     .filter((entry) => entry !== '');
 }
 
+/** 进程内去重：同一 (kind, peerId, senderId) 只记一次，避免刷屏写盘。 */
+const blockedSeen = new Set<string>();
+
+/**
+ * 记录被白名单拒绝的会话标识，供用户配置白名单时取用。
+ *
+ * 桌面版的 logger 输出不可见，而「先把模式设成 allowlist、再去群里 @ 一下」
+ * 是拿到 group_openid 最自然的路径 —— 因此落一份 JSONL 到 DSH_HOME 下，
+ * 用户（或运维）直接读文件就能拿到要填的白名单值。
+ *
+ * 群聊场景尤其重要：group_openid 没有任何官方后台可查，只能从事件里取。
+ */
+function recordBlockedPeer(mCtx: unknown, reason: string): void {
+  try {
+    const message = ((mCtx as { message?: Record<string, unknown> }).message) ?? {};
+    const kind = typeof message.kind === 'string' ? message.kind : '';
+    const pick = (field: string): string => (typeof message[field] === 'string' ? (message[field] as string) : '');
+    const peerId = pick('groupOpenid') || pick('channelId') || pick('senderId');
+    const senderId = pick('senderId');
+    if (peerId === '') return;
+    const key = `${kind}:${peerId}:${senderId}`;
+    if (blockedSeen.has(key)) return;
+    blockedSeen.add(key);
+    appendFileSync(
+      join(process.env.DSH_HOME ?? os.tmpdir(), 'qqbot-blocked-peers.jsonl'),
+      JSON.stringify({
+        at: new Date().toISOString(),
+        kind,
+        peerId,
+        senderId,
+        senderName: pick('senderName'),
+        reason,
+      }) + '\n',
+      'utf8',
+    );
+  } catch { /* 记录失败不影响拦截本身 */ }
+}
+
 export function setupMiddlewares(
   bot: QQBot,
   config: ImQQBotConfig,
@@ -68,10 +109,11 @@ export function setupMiddlewares(
       mode: config.access.groupMode,
       allow: normalizeAllow(config.access.groupAllow),
     },
-    onBlock: (_mCtx, reason) => {
+    onBlock: (mCtx, reason) => {
       // 被拒时始终记一条 info：reason 里带 openid，用户第一次配置白名单时
       // 就靠这行拿到自己的标识（桌面版的 debug 日志默认看不到）。
       logger.info(`Access blocked: ${reason}`);
+      recordBlockedPeer(mCtx, reason);
     },
   }));
 
