@@ -6,6 +6,11 @@
 export interface ModelRoute {
   provider: string;
   model: string;
+  /**
+   * 思考强度覆盖（本地 fork 补丁）：仅当 config.reasoningEffort 非空时出现。
+   * 由 session-manager 通过 installModelSelection 应用，只影响本通道的 agent。
+   */
+  reasoningEffort?: string;
 }
 
 /** 模型信息条目 */

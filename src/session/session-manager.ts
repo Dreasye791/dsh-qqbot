@@ -12,8 +12,13 @@
  * 支持 agent-presets 系统：通过 setup hook 在 create/resume 时
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
+import { appendFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import os from 'node:os';
+import { join } from 'node:path';
 import { SessionId } from '@deepseek-ai/dsh-session';
+import { installModelSelection } from '@deepseek-ai/dsh-agent';
+import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
@@ -311,6 +316,7 @@ export class SessionManager {
     const childId = SessionId(randomUUID());
     const effectiveRoute = options.route ?? this.modelResolver.getEffectiveRoute(key);
     const composed = await this.composePreset(this.getEffectivePresetByKey(key));
+    const setup = this.wrapSetupWithEffort(effectiveRoute, composed.setup);
     const created = await this.agents.create({
       sessionId: childId,
       seed,
@@ -321,7 +327,7 @@ export class SessionManager {
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
       },
       ...(effectiveRoute ? { agentOptions: effectiveRoute } : {}),
-      ...(composed.setup ? { setup: composed.setup } : {}),
+      ...(setup ? { setup } : {}),
     });
 
     this.modelResolver.setSessionId(key, childId);
@@ -440,9 +446,49 @@ export class SessionManager {
     return this.modelResolver.getSessionId(sessionKey) ?? this.deriveSessionId(sessionKey);
   }
 
+  /**
+   * 本地 fork 补丁：把 config.reasoningEffort 装到 agent 的模型选择上。
+   *
+   * 宿主的 `AgentOptions` 只有 provider/model/maxTokens，**没有** reasoningEffort；
+   * 唯一生效路径是 `installModelSelection(agentCtx, ref)` —— 它把 selection 耦合到
+   * agent 作用域的 prompt assembly 与 request routing（会在请求前把 effort 重新
+   * 应用），因此与本通道的 provider/model 覆盖是同一套机制。
+   *
+   * route 上没有 reasoningEffort（= config 留空）时原样返回，保持「继承宿主默认」。
+   */
+  private wrapSetupWithEffort(
+    route: ModelRoute | undefined,
+    setup: PresetComposition['setup'],
+  ): PresetComposition['setup'] {
+    const effort = route?.reasoningEffort;
+    if (route === undefined || effort === undefined || effort === '') return setup;
+    // 宿主的 ModelSelection 用 branded ReasoningEffortId；档位名已由 config schema
+    // 的 union 校验过，这里只需在类型层收窄（运行期值不变）。
+    const selection = {
+      current: { provider: route.provider, model: route.model, reasoningEffort: effort },
+      assembled: undefined,
+    } as unknown as ModelSelectionRef;
+    return async (agentCtx) => {
+      await setup?.(agentCtx);
+      installModelSelection(agentCtx, selection);
+    };
+  }
+
   private async composePreset(presetId?: string): Promise<PresetComposition> {
     const presets = this.getPresetsService();
     if (!presets) return {};
+    // 本地 fork 补丁（关键）：只在**显式配置** preset 时才挂。
+    //
+    // 原实现会把 undefined resolve 成宿主默认 preset（standard）再显式 mount，
+    // 而 standard 里的 dsh-persona / dsh-file-reference-local / team-policy 等插件
+    // 使用**全局 ctx** 注册 prompt section（registry 全局唯一）。第一个 agent 挂载
+    // 时注册成功，第二个 agent 再挂就抛 "already registered"，直接让 resume/create
+    // 失败，表现成「处理消息时出现异常」。
+    //
+    // 不挂 preset 时 agent 继承全局层（onebot 通道就是这个行为，它的配置里没有
+    // agentPreset），工具与 prompt 均可用。需要 preset 时在配置面板显式填写。
+    const configured = (this.config.preset ?? '').trim();
+    if (configured === '') return {};
 
     try {
       const resolved = await presets.resolve(presetId);
@@ -450,7 +496,19 @@ export class SessionManager {
       return {
         agentPreset: resolvedId,
         setup: async (agentCtx: Context) => {
-          await presets.mount(agentCtx, resolvedId);
+          // 本地 fork 补丁：宿主 dsh-persona 在 preset mount 时会在全局 ctx 注册
+          // `deployment:persona-prefix`；第二个 agent 起来时该 section 已存在，
+          // mount 抛 RemoteError 并让整个 setup 失败 —— 表现成「处理消息时出现
+          // 异常」，且 resume/create 两条路径都会挂。preset 属于增强项（工具集与
+          // 额外 prompt），挂不上不应拖垮通道：记一条 warn 继续。
+          try {
+            await presets.mount(agentCtx, resolvedId);
+          } catch (mountErr) {
+            this.logger.warn(
+              `im-qqbot: preset ${resolvedId} mount failed: `
+              + `${mountErr instanceof Error ? mountErr.message : String(mountErr)} — continuing without preset`,
+            );
+          }
         },
       };
     } catch (err) {
@@ -484,6 +542,8 @@ export class SessionManager {
     let agent: DshAgent;
     let handle: DshAgentHandle | undefined;
     let agentPreset: string | undefined;
+    /** resume 失败后重建时使用的新 sessionId（覆盖记录里的旧值） */
+    let recordSessionIdOverride: ReturnType<typeof SessionId> | undefined;
 
     const live = this.agents.get(sessionId);
     if (live) {
@@ -495,35 +555,60 @@ export class SessionManager {
       const presetId = (await this.resolvePersistedPreset(sessionId)) ?? this.getEffectivePresetByKey(key);
       const composed = await this.composePreset(presetId);
       agentPreset = composed.agentPreset;
+      const resumeRoute = this.modelResolver.getResumeRoute(key);
+      const setup = this.wrapSetupWithEffort(resumeRoute, composed.setup);
       try {
-        const resumeRoute = this.modelResolver.getResumeRoute(key);
         const resumed = await this.agents.resume({
           resumeSessionId: sessionId,
           ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
+          ...(setup ? { setup } : {}),
         });
         agent = resumed.agent;
         handle = resumed;
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
-      } catch {
+      } catch (resumeErr) {
+        // 本地 fork 补丁：resume 失败时若沿用同一 sessionId，create 会抛
+        // SessionAlreadyExistsError（磁盘上已有该会话文件），最终表现成
+        // 「处理消息时出现异常」且完全看不到根因。这里做两件事：
+        //  1) 把 resume 的真实原因落盘（桌面版的 logger 不可见）；
+        //  2) 换一个全新 sessionId 重建，避免二次抛错把通道卡死
+        //     （旧会话文件保留，需要历史时可人工找回）。
+        const resumeDetail = resumeErr instanceof Error
+          ? (resumeErr.stack ?? resumeErr.message)
+          : String(resumeErr);
+        this.logger.warn(`resume failed, rebuilding with a fresh sessionId: key=${key} err=${resumeDetail}`);
+        // 诊断落盘（QQBOT_DEBUG=1 时启用）：resume 的失败原因原本被 catch 吞掉，
+        // 只剩二次错误 SessionAlreadyExistsError，无法定位。默认关闭。
+        if (process.env.QQBOT_DEBUG === '1') {
+          try {
+            appendFileSync(
+              join(process.env.DSH_HOME ?? os.tmpdir(), 'qqbot-error.log'),
+              new Date().toISOString() + ' RESUME_FAILED key=' + key + '\n' + resumeDetail + '\n\n',
+              'utf8',
+            );
+          } catch { /* 诊断失败不影响主流程 */ }
+        }
+        const freshId = SessionId(randomUUID());
         const created = await this.agents.create({
-          sessionId,
+          sessionId: freshId,
           meta: {
             cwd: this.config.cwd || process.cwd(),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
+          ...(setup ? { setup } : {}),
         });
         agent = created.agent;
         handle = created;
-        this.logger.info(`created new session: key=${key} preset=${agentPreset ?? 'none'}`);
+        this.modelResolver.setSessionId(key, freshId);
+        this.logger.info(`created new session (rebuild): key=${key} sessionId=${freshId} preset=${agentPreset ?? 'none'}`);
+        recordSessionIdOverride = freshId;
       }
     }
 
     const record: SessionRecord = {
       sessionKey: key,
-      sessionId,
+      sessionId: recordSessionIdOverride ?? sessionId,
       agent,
       handle: handle ?? { agent, dispose: async () => {} },
       replyTarget,

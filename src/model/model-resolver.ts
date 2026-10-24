@@ -52,7 +52,18 @@ export class ModelResolver {
    * 优先级：per-peer 偏好 > config 显式指定 > settings.yaml > 宿主服务
    */
   getEffectiveRoute(sessionKey: string): ModelRoute | undefined {
-    return this.prefs.getOverride(sessionKey) ?? this.resolveDefault();
+    return this.withEffort(this.prefs.getOverride(sessionKey) ?? this.resolveDefault());
+  }
+
+  /**
+   * 本地 fork 补丁：把 config.reasoningEffort 贴到路由上。
+   * 留空 = 不动（保持「继承宿主默认档位」的原有语义）。
+   */
+  private withEffort(route: ModelRoute | undefined): ModelRoute | undefined {
+    if (route === undefined) return undefined;
+    const effort = this.config.reasoningEffort;
+    if (effort === undefined || effort === '') return route;
+    return { ...route, reasoningEffort: effort };
   }
 
   /**
@@ -67,13 +78,13 @@ export class ModelResolver {
    */
   getResumeRoute(sessionKey: string): ModelRoute | undefined {
     const override = this.prefs.getOverride(sessionKey);
-    if (override) return override;
+    if (override) return this.withEffort(override);
 
     if (this.config.provider && this.config.model) {
-      return { provider: this.config.provider, model: this.config.model };
+      return this.withEffort({ provider: this.config.provider, model: this.config.model });
     }
 
-    return this.resolveDefault();
+    return this.withEffort(this.resolveDefault());
   }
 
   /**

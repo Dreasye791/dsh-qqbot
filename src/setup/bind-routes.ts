@@ -22,6 +22,8 @@ import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
+  BIND_MODEL_OPTIONS_PATH,
+  type ModelOptionsWire,
   BIND_MANUAL_PATH,
   BIND_REFRESH_PATH,
   BIND_STATE_PATH,
@@ -82,15 +84,23 @@ export interface BindRoutesOptions {
    */
   currentConfig?: () => Record<string, unknown>;
   /**
+   * 模型目录（本地 fork 补丁）：配置页「模型 / 思考强度」下拉的数据源。
+   * 未提供时返回 available=false，前端回退手填（与旧行为一致）。
+   */
+  modelOptions?: () => ModelOptionsWire | Promise<ModelOptionsWire>;
+  /**
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
   onUpdateConfig?: (config: Record<string, unknown>) => boolean;
 }
 
+/** 思考档位（与 config.ts 的 union 对齐；'' = 继承宿主默认） */
+const REASONING_EFFORTS = new Set(['', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
 /** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
 const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
-  'provider', 'model', 'preset',
+  'provider', 'model', 'reasoningEffort', 'preset',
   'groupPrompt', 'directPrompt',
   'access',
 ]);
@@ -103,6 +113,14 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   debug: (v) => booleanSchema(v, 'debug'),
   provider: stringSchema('provider'),
   model: stringSchema('model'),
+  // 枚举校验而非只验类型：非法档位会让 ConfigSchema 的 union 在重载时抛错，
+  // 表现为「保存成功但插件起不来」，比当场拒绝更糟。
+  reasoningEffort: (v) => {
+    if (typeof v !== 'string' || !REASONING_EFFORTS.has(v)) {
+      throw new TypeError('reasoningEffort 取值不合法（可选：' + [...REASONING_EFFORTS].join('/') + '）');
+    }
+    return v;
+  },
   preset: stringSchema('preset'),
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
@@ -171,6 +189,11 @@ export function registerBindRoutes(
       kind: 'exact',
       path: BIND_CONFIG_PATH,
       handler: (req, res) => handleConfig(req, res, options),
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_MODEL_OPTIONS_PATH,
+      handler: (req, res) => handleModelOptions(req, res, options),
     }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
@@ -344,6 +367,40 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
  * - GET：回显当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）
  * - POST：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载
  */
+/**
+ * 模型目录（本地 fork 补丁）：配置页下拉的数据源。
+ * 拿不到宿主 llm 服务时不报错，返回 available=false 让前端回退手填。
+ */
+async function handleModelOptions(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+): Promise<void> {
+  if (!trusted(req)) {
+    sendJson(res, 403, { error: 'forbidden' });
+    return;
+  }
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (options.modelOptions === undefined) {
+    sendJson(res, 200, { available: false, providers: [], efforts: [] } satisfies ModelOptionsWire);
+    return;
+  }
+  try {
+    sendJson(res, 200, await options.modelOptions());
+  } catch (err) {
+    // 发现失败不是错误态：面板降级为手填即可，避免把设置页卡在报错上。
+    sendJson(res, 200, {
+      available: false,
+      providers: [],
+      efforts: [],
+      error: err instanceof Error ? err.message : String(err),
+    } satisfies ModelOptionsWire);
+  }
+}
+
 async function handleConfig(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): Promise<void> {
   if (!trusted(req)) {
     sendJson(res, 403, { error: 'forbidden' });

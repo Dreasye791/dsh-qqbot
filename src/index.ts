@@ -12,6 +12,7 @@ import type { DshAgentRegistry } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
+import type { ModelOptionsWire, ProviderOptionWire } from './shared/bind-protocol.ts';
 
 // ── Cordis 插件元数据 ──
 export const name = 'im-qqbot';
@@ -74,9 +75,57 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   // 已绑定：注册常驻路由（状态回显 + 手动编辑/更换凭据 + 配置编辑）
-  registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
+  registerBoundCredentialRoutes(ctx, logger, appId, { ...config }, () => buildModelOptions(ctx));
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 
   await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+}
+
+/** 思考档位（与 pi-ai 的 ReasoningEffortId 对齐；'' = 继承宿主默认） */
+const EFFORT_OPTIONS: ReadonlyArray<{ id: string; name: string }> = [
+  { id: '', name: '继承（默认）' },
+  { id: 'off', name: '关闭思考' },
+  { id: 'minimal', name: '极低' },
+  { id: 'low', name: '低' },
+  { id: 'medium', name: '中' },
+  { id: 'high', name: '高' },
+  { id: 'xhigh', name: '很高' },
+  { id: 'max', name: '最大' },
+];
+
+/** ctx.llm 的最小投影（不做类型硬绑定，宿主小版本升级不至于编译失败） */
+interface LlmCatalogLike {
+  listProviders(): Array<{ id: string; name?: string } | string>;
+  listModels(id: string): Promise<Array<{ id: string; name?: string }>>;
+}
+
+/**
+ * 本地 fork 补丁：给配置页提供 provider → model 的实时候选。
+ * 发现失败一律降级为 available=false（前端回退手填），不把设置页卡在错误态。
+ */
+async function buildModelOptions(ctx: Context): Promise<ModelOptionsWire> {
+  const efforts = EFFORT_OPTIONS.map(option => ({ ...option }));
+  try {
+    const llm = (ctx as unknown as { llm?: LlmCatalogLike }).llm;
+    if (llm === undefined) return { available: false, providers: [], efforts };
+    const raw = llm.listProviders() ?? [];
+    const providers: ProviderOptionWire[] = [];
+    for (const entry of raw) {
+      if (entry === null || entry === undefined) continue;
+      const id = typeof entry === 'string' ? entry : entry.id;
+      const name = typeof entry === 'string' ? entry : (entry.name ?? entry.id);
+      const models = await llm.listModels(id);
+      providers.push({
+        id,
+        name,
+        models: (models ?? [])
+          .filter(model => model !== null && model !== undefined && typeof model.id === 'string')
+          .map(model => ({ id: model.id, name: model.name ?? model.id })),
+      });
+    }
+    return { available: providers.length > 0, providers, efforts };
+  } catch {
+    return { available: false, providers: [], efforts };
+  }
 }

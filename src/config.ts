@@ -56,6 +56,12 @@ export interface ImQQBotConfig {
   provider?: string;
   /** 模型名称 */
   model?: string;
+  /**
+   * 思考强度覆盖（本地 fork 补丁）：留空 = 继承宿主 agent-default-model 的档位；
+   * 非空则本通道创建的每个 agent 都用该值，Web/GUI 会话不受影响。
+   * 合法值与 pi-ai 的 ReasoningEffortId 对齐（off/minimal/low/medium/high/xhigh/max）。
+   */
+  reasoningEffort?: '' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Agent preset id */
   preset?: string;
   /** Agent 工作目录（缺省回落到进程 cwd） */
@@ -107,6 +113,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
+  reasoningEffort: Schema.union(['', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    .default('')
+    .description('思考强度覆盖：留空继承宿主默认；只在模型支持的档位上生效'),
   preset: Schema.string().description('Agent preset id'),
   cwd: Schema.string().description('Agent working directory'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),

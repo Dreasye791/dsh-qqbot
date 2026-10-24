@@ -15,7 +15,7 @@
  * 类字段走 profile patch / 环境变量。
  */
 import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { BIND_CONFIG_PATH, BIND_MODEL_OPTIONS_PATH, type ModelOptionsWire } from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -33,6 +33,8 @@ type ConfigWire = {
   debug?: boolean;
   provider?: string;
   model?: string;
+  /** 本地 fork 补丁：思考强度覆盖（'' = 继承宿主默认） */
+  reasoningEffort?: string;
   preset?: string;
   groupPrompt?: string;
   directPrompt?: string;
@@ -235,6 +237,30 @@ function SegmentedRow({ label, help, value, options, onChange }: {
 
 type AccessMode = AccessControlWire['c2cMode'];
 
+/**
+ * 下拉选择行（本地 fork 补丁）：模型 / 思考强度用。
+ * 复用 imqb2-input 的视觉（同宽同高），原生 select 保证键盘可达。
+ */
+function SelectRow({ label, help, value, options, onChange }: {
+  label: string;
+  help?: string;
+  value: string;
+  options: ReadonlyArray<{ id: string; name: string }>;
+  onChange: (next: string) => void;
+}): ReactNode {
+  return createElement('label', { className: 'imqb2-field' },
+    createElement('div', { className: 'imqb2-head' },
+      createElement('span', { className: 'imqb2-label' }, label),
+      help !== undefined ? createElement('span', { className: 'imqb2-hint' }, help) : null,
+    ),
+    createElement('select', {
+      className: 'imqb2-input',
+      value,
+      onChange: (event: ChangeEvent<HTMLSelectElement>) => { onChange(event.target.value); },
+    }, options.map(option => createElement('option', { key: option.id, value: option.id }, option.name))),
+  );
+}
+
 const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
@@ -259,6 +285,20 @@ export function ConfigPanel(): ReactNode {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 本地 fork 补丁：模型目录（provider → model + 思考档位）。拿不到时保持 null，
+  // 面板回退手填（与旧版一致），不影响保存。
+  const [catalog, setCatalog] = useState<ModelOptionsWire | null>(null);
+
+  useEffect(() => {
+    let stopped = false;
+    void fetch(BIND_MODEL_OPTIONS_PATH, { cache: 'no-store' })
+      .then(async (res) => (res.ok ? (await res.json()) as ModelOptionsWire : null))
+      .then((value) => {
+        if (!stopped && value !== null) setCatalog(value);
+      })
+      .catch(() => { /* 发现失败静默降级为手填 */ });
+    return () => { stopped = true; };
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -377,13 +417,54 @@ export function ConfigPanel(): ReactNode {
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '模型'),
-    createElement(FieldRow, {
-      label: 'Provider', value: form.provider ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('provider', v); },
-    }),
-    createElement(FieldRow, {
-      label: 'Model', value: form.model ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('model', v); },
+    // 本地 fork 补丁：能拿到宿主模型目录时改用下拉（避免手打 provider/model
+    // 拼错导致 agent 创建失败）；拿不到时保持原来的手填，行为向下兼容。
+    ...(catalog !== null && catalog.available && catalog.providers.length > 0
+      ? [
+          createElement(SelectRow, {
+            label: 'Provider',
+            value: form.provider ?? '',
+            options: [{ id: '', name: '继承宿主默认' }, ...catalog.providers.map(p => ({ id: p.id, name: p.name }))],
+            onChange: (v: string) => { patch('provider', v); patch('model', ''); },
+          }),
+          createElement(SelectRow, {
+            label: 'Model',
+            value: form.model ?? '',
+            options: [
+              { id: '', name: '继承宿主默认' },
+              ...(catalog.providers.find(p => p.id === (form.provider ?? ''))?.models ?? [])
+                .map(m => ({ id: m.id, name: m.name })),
+            ],
+            onChange: (v: string) => { patch('model', v); },
+          }),
+        ]
+      : [
+          createElement(FieldRow, {
+            label: 'Provider', value: form.provider ?? '', placeholder: '留空继承宿主默认',
+            onChange: (v: string) => { patch('provider', v); },
+          }),
+          createElement(FieldRow, {
+            label: 'Model', value: form.model ?? '', placeholder: '留空继承宿主默认',
+            onChange: (v: string) => { patch('model', v); },
+          }),
+        ]),
+    createElement(SelectRow, {
+      label: '思考强度',
+      help: '留空继承宿主默认；只有模型支持的档位才真正生效',
+      value: form.reasoningEffort ?? '',
+      options: (catalog !== null && catalog.efforts.length > 0
+        ? catalog.efforts
+        : [
+            { id: '', name: '继承（默认）' },
+            { id: 'off', name: '关闭思考' },
+            { id: 'minimal', name: '极低' },
+            { id: 'low', name: '低' },
+            { id: 'medium', name: '中' },
+            { id: 'high', name: '高' },
+            { id: 'xhigh', name: '很高' },
+            { id: 'max', name: '最大' },
+          ]).map(o => ({ id: o.id, name: o.name })),
+      onChange: (v: string) => { patch('reasoningEffort', v); },
     }),
     createElement(FieldRow, {
       label: 'Preset', value: form.preset ?? '', placeholder: 'Agent preset id',

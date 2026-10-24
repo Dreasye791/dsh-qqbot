@@ -8,6 +8,9 @@
  * - Layer 4: dynamicCtx（媒体元数据）
  * - Layer 5: agentBody（history + base 拼合）
  */
+import { appendFileSync } from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionManager } from '../session/index.ts';
@@ -116,7 +119,16 @@ export async function handleInbound(
   try {
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
-    logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    logger.error(`ERROR creating session: ${detail}`);
+    // 诊断落盘（QQBOT_DEBUG=1 时启用）：桌面版的 logger 输出不可见，
+    // 会话创建失败时只有靠落盘才能看到真实栈。默认关闭，避免常态写文件。
+    if (process.env.QQBOT_DEBUG === '1') {
+      try {
+        const base = process.env.DSH_HOME ?? os.tmpdir();
+        appendFileSync(join(base, 'qqbot-error.log'), new Date().toISOString() + '\n' + detail + '\n\n', 'utf8');
+      } catch { /* 诊断失败不影响主流程 */ }
+    }
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
       await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');

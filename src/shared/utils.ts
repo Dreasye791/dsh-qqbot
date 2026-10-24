@@ -48,6 +48,13 @@ export function buildUserAgent(): string {
  * @param baseDir - 起始目录，缺省为插件根（可注入便于测试）
  */
 export function getProfileDir(baseDir: string = PLUGIN_ROOT): string | null {
+  // 显式覆盖（本地 fork 补丁）：link / Junction 安装时，模块真实路径位于源码
+  // checkout 内，向上探测永远跨不过 node_modules 边界 → 返回 null → 扫码凭据
+  // 无法落盘、解绑按钮写不回 cordis.patch.yml。此时用 DSH_PROFILE_DIR 明确
+  // 告知 profile 位置（由宿主 profile 的启动环境或手动设置提供）。
+  const explicit = process.env.DSH_PROFILE_DIR?.trim();
+  if (explicit !== undefined && explicit !== '' && existsSync(explicit)) return explicit;
+
   // 主策略：跨过 node_modules 边界后，优先命中 cordis.patch.yml（凭据写入
   // 目标），其次 pnpm-workspace.yaml。跨越守卫是关键——插件包自身随包携带
   // cordis.patch.yml（dsh.bundle.patch 分发物）、源码 checkout 根也有同名
